@@ -1,5 +1,5 @@
 {
-  "name": "tdjane",
+  "name": "auralspirit",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,7 +12,9 @@
     "lit": "^3.3.0",
     "@google/genai": "^1.0.0",
     "@ffmpeg/ffmpeg": "0.12.10",
-    "@ffmpeg/util": "0.12.1"
+    "@ffmpeg/util": "0.12.1",
+    "utility-types": "3.1.0",
+    "dom": "^0.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

@@ -1,6 +1,8 @@
 {
-  "name": "tDJane",
+  "name": "AURALSPIRIT",
   "description": "Steer a continuous stream of music with text prompts",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "microphone"
+  ],
   "prompt": ""
 }
