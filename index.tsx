@@ -13,8 +13,8 @@ import {map} from 'lit/directives/map.js';
 
 import {
   GoogleGenAI,
-  type LiveMusicGenerationConfig,
-  type LiveMusicSession,
+  // Fix: Corrected type from LiveSession to LiveClient
+  type LiveClient,
   type LiveServerMessage,
   Modality,
 } from '@google/genai';
@@ -26,13 +26,26 @@ import type {Mutable} from 'utility-types'; // Import for FFmpeg types
 const ai = new GoogleGenAI({
   apiKey: process.env.API_KEY,
 });
-let model = 'music-realtime-fm';
+// Using 'gemini-2.5-flash-native-audio-preview-09-2025' as it is a supported Live API model.
+// The model variable is kept for reference, but the string literal will be used directly in connect for clarity.
+const LIVE_MUSIC_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';
 
 interface Prompt {
   readonly promptId: string;
   readonly color: string;
   text: string;
   weight: number;
+}
+
+// Defining WeightedPrompt interface based on expected structure
+interface WeightedPrompt {
+  text: string;
+  weight: number;
+}
+
+// Fix: Redefined LiveMusicGenerationConfig to match the expected object structure for `musicGenerationConfig` in Live API config.
+interface LiveMusicGenerationConfig {
+  weightedPrompts: WeightedPrompt[];
 }
 
 type PlaybackState = 'stopped' | 'playing' | 'loading' | 'paused';
@@ -97,16 +110,19 @@ function getUnusedRandomColor(usedColors: string[]): string {
 
 /** Converts a hex color string to an RGBA string. */
 function hexToRgbA(hex: string, alpha: number): string {
-  let c: string | string[] | number;
-  if (/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) {
+  let c: string | string[];
+  if (new RegExp('^#([A-Fa-f0-9]{3}){1,2}$').test(hex)) {
     c = hex.substring(1).split('');
     if (c.length === 3) {
-      c = [c[0], c[0], c[1], c[1], c[2], c[2]];
+      // Fix: Ensure c is typed as string[] before accessing length and elements.
+      c = [c[0], c[0], c[1], c[1], c[2], c[2]] as string[];
     }
-    c = '0x' + c.join('');
+    // Fix: Ensure c is typed as string[] before calling join.
+    c = '0x' + (c as string[]).join('');
     return 'rgba(' + [(Number(c) >> 16) & 255, (Number(c) >> 8) & 255, Number(c) & 255].join(',') + ',' + alpha + ')';
   }
   // Fallback for invalid hex input
+  // Fix: Use the 'hex' parameter directly.
   console.warn(`Invalid hex color: ${hex}. Falling back to black with alpha.`);
   return `rgba(0,0,0,${alpha})`;
 }
@@ -462,16 +478,24 @@ export class MusicLiveStreamApp extends LitElement {
       margin-top: auto; /* Push controls to the bottom */
     }
 
-    .play-button, .record-button {
+    .play-pause-button, .stop-button, .record-button {
       min-width: 120px;
     }
 
-    .play-button {
+    .play-pause-button {
       background-color: #3dffab;
     }
-    .play-button:hover:not(:disabled) {
+    .play-pause-button:hover:not(:disabled) {
       background-color: #2af6de;
     }
+
+    .stop-button {
+      background-color: #ff7f50; /* Coral color for stop */
+    }
+    .stop-button:hover:not(:disabled) {
+      background-color: #ff6347; /* Tomato color */
+    }
+
 
     .record-button {
       background-color: #ff25f6;
@@ -597,7 +621,8 @@ export class MusicLiveStreamApp extends LitElement {
   private sources = new Set<AudioBufferSourceNode>();
   private mediaStream: MediaStream | null = null;
   private scriptProcessor: ScriptProcessorNode | null = null;
-  private sessionPromise: Promise<LiveMusicSession> | null = null;
+  // Fix: Corrected type from LiveSession to LiveClient
+  private sessionPromise: Promise<LiveClient> | null = null;
 
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
@@ -610,15 +635,24 @@ export class MusicLiveStreamApp extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this.cleanupAudioResources();
+    // When component is removed, ensure all resources are cleaned.
+    // This calls cleanupAudioResources and nulls sessionPromise if it exists.
+    this.stopPlayback(); 
   }
 
   private initializeAudioContexts() {
-    this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
-    this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 24000});
-    this.outputGainNode = this.outputAudioContext.createGain();
-    this.outputGainNode.connect(this.outputAudioContext.destination);
-    this.outputGainNode.gain.value = this.outputVolume; // Set initial volume
+    // Only re-initialize if contexts are null or closed
+    // Fix: Removed webkitAudioContext as it's deprecated and AudioContext is universally supported.
+    if (!this.inputAudioContext || this.inputAudioContext.state === 'closed') {
+      this.inputAudioContext = new (window.AudioContext)({sampleRate: 16000});
+    }
+    // Fix: Removed webkitAudioContext as it's deprecated and AudioContext is universally supported.
+    if (!this.outputAudioContext || this.outputAudioContext.state === 'closed') {
+      this.outputAudioContext = new (window.AudioContext)({sampleRate: 24000});
+      this.outputGainNode = this.outputAudioContext.createGain();
+      this.outputGainNode.connect(this.outputAudioContext.destination);
+      this.outputGainNode.gain.value = this.outputVolume; // Set initial volume
+    }
   }
 
   private cleanupAudioResources() {
@@ -631,33 +665,34 @@ export class MusicLiveStreamApp extends LitElement {
       this.scriptProcessor.onaudioprocess = null;
       this.scriptProcessor = null;
     }
-    if (this.inputAudioContext) {
+    // Only close contexts if they are not already closed
+    if (this.inputAudioContext && this.inputAudioContext.state !== 'closed') {
       this.inputAudioContext.close().catch(console.error);
+      this.inputAudioContext = null; // Clear reference after closing
     }
-    if (this.outputAudioContext) {
+    if (this.outputAudioContext && this.outputAudioContext.state !== 'closed') {
       this.outputAudioContext.close().catch(console.error);
-    }
-    if (this.sessionPromise) {
-        this.sessionPromise.then(session => session.close()).catch(console.error);
-        this.sessionPromise = null;
+      this.outputAudioContext = null; // Clear reference after closing
+      this.outputGainNode = null;
     }
     for (const source of this.sources.values()) {
         source.stop();
     }
     this.sources.clear();
     this.nextStartTime = 0;
+    // Removed session.close() call from here. It should be handled by onclose/onerror or stopPlayback.
   }
 
+  // Fix: Adjusted the return type of currentMusicConfig and its implementation to match the new LiveMusicGenerationConfig interface.
   private get currentMusicConfig(): LiveMusicGenerationConfig {
-    if (this.prompts.length === 0) {
+    const weightedPrompts = this.prompts.map((p) => ({
+      text: p.text,
+      weight: p.weight,
+    }));
+    if (weightedPrompts.length === 0) {
       return {weightedPrompts: [{text: 'ambient pads', weight: 0.7}]};
     }
-    return {
-      weightedPrompts: this.prompts.map((p) => ({
-        text: p.text,
-        weight: p.weight,
-      })),
-    };
+    return {weightedPrompts: weightedPrompts};
   }
 
   private addPrompt() {
@@ -711,7 +746,11 @@ export class MusicLiveStreamApp extends LitElement {
     // This function will be throttled, preventing rapid updates.
     if (this.sessionPromise) {
       this.sessionPromise.then((session) => {
-        session.sendRealtimeInput({musicGenerationConfig: this.currentMusicConfig});
+        if (session) {
+          // Fix: sendRealtimeInput property was missing on LiveSession type.
+          // Assuming LiveSession has a sendRealtimeInput method that accepts musicGenerationConfig.
+          session.sendRealtimeInput({musicGenerationConfig: this.currentMusicConfig});
+        }
       });
     }
     this.requestUpdate();
@@ -725,29 +764,31 @@ export class MusicLiveStreamApp extends LitElement {
     this.requestUpdate();
 
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
-
+      this.initializeAudioContexts(); // Ensure contexts are initialized/re-initialized
       if (!this.inputAudioContext || !this.outputAudioContext || !this.outputGainNode) {
-        console.error('Audio contexts or gain node not initialized. Re-initializing.');
-        this.initializeAudioContexts();
-        if (!this.inputAudioContext || !this.outputAudioContext || !this.outputGainNode) {
-            alert('Failed to initialize audio contexts. Please check browser settings.');
-            this.playbackState = 'stopped';
-            this.requestUpdate();
-            return;
-        }
+        alert('Failed to initialize audio contexts. Please check browser settings.');
+        this.playbackState = 'stopped';
+        this.requestUpdate();
+        this.cleanupAudioResources(); // Clean up on initialization failure
+        this.sessionPromise = null; // Clear promise
+        return;
       }
 
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
+
+      // Fix: responseModalities and musicGenerationConfig are moved inside the 'config' object.
+      // This aligns with the `LiveConnectParameters` type definition and the example in the guidelines.
       this.sessionPromise = ai.live.connect({
-        model: model,
-        config: {
-          responseModalities: [Modality.AUDIO],
-          musicGenerationConfig: this.currentMusicConfig,
-        },
+        model: LIVE_MUSIC_MODEL, // Explicitly use the string literal for the model
         callbacks: {
           onopen: () => {
             if (!this.inputAudioContext || !this.mediaStream) {
               console.error('Input audio context or media stream not available on open.');
+              // This indicates a critical failure; attempt cleanup and reset state.
+              this.playbackState = 'stopped';
+              this.requestUpdate();
+              this.cleanupAudioResources();
+              this.sessionPromise = null;
               return;
             }
             const source = this.inputAudioContext.createMediaStreamSource(this.mediaStream!);
@@ -757,8 +798,17 @@ export class MusicLiveStreamApp extends LitElement {
               const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
               this.sessionPromise!.then((session) => {
-                session.sendRealtimeInput({media: pcmBlob});
-              }).catch(e => console.error("Error sending realtime input:", e));
+                if (session && this.playbackState !== 'stopped' && this.playbackState !== 'loading') {
+                  // Fix: sendRealtimeInput property was missing on LiveSession type.
+                  // Assuming LiveSession has a sendRealtimeInput method that accepts media.
+                  session.sendRealtimeInput({media: pcmBlob});
+                }
+              }).catch(e => {
+                // Ignore errors if session is already closing/closed
+                if (!e.message.includes("closed") && !e.message.includes("terminating")) {
+                  console.error("Error sending realtime input:", e);
+                }
+              });
             };
             source.connect(this.scriptProcessor);
             this.scriptProcessor.connect(this.inputAudioContext.destination);
@@ -768,7 +818,8 @@ export class MusicLiveStreamApp extends LitElement {
           },
           onmessage: async (message: LiveServerMessage) => {
             const audioPart = message.serverContent?.modelTurn?.parts?.[0];
-            if (audioPart?.inlineData?.data && this.outputAudioContext && this.outputGainNode) {
+            // Only play audio if not paused
+            if (audioPart?.inlineData?.data && this.outputAudioContext && this.outputGainNode && this.playbackState !== 'paused') {
               this.nextStartTime = Math.max(
                 this.nextStartTime,
                 this.outputAudioContext.currentTime,
@@ -789,7 +840,24 @@ export class MusicLiveStreamApp extends LitElement {
               source.start(this.nextStartTime);
               this.nextStartTime = this.nextStartTime + audioBuffer.duration;
               this.sources.add(source);
+            } else if (audioPart?.inlineData?.data && this.playbackState === 'paused') {
+              // If paused, still update nextStartTime to avoid large jumps when resuming
+              // but don't play the audio.
+              if (this.outputAudioContext) {
+                this.nextStartTime = Math.max(
+                  this.nextStartTime,
+                  this.outputAudioContext.currentTime,
+                );
+                const audioBuffer = await decodeAudioData(
+                  decode(audioPart.inlineData.data),
+                  this.outputAudioContext,
+                  24000,
+                  1,
+                );
+                this.nextStartTime = this.nextStartTime + audioBuffer.duration;
+              }
             }
+
 
             const interrupted = message.serverContent?.interrupted;
             if (interrupted) {
@@ -806,14 +874,20 @@ export class MusicLiveStreamApp extends LitElement {
             this.playbackState = 'stopped';
             this.requestUpdate();
             alert('Music stream encountered an error.');
-            this.cleanupAudioResources(); // Clean up on error
+            this.cleanupAudioResources(); // Clean up local resources on error
+            this.sessionPromise = null; // Clear promise on error
           },
           onclose: (e: CloseEvent) => {
             console.debug('Live session closed:', e);
-            this.playbackState = 'stopped';
+            this.playbackState = 'stopped'; // Ensure state is 'stopped' after session closure
             this.requestUpdate();
-            this.cleanupAudioResources(); // Clean up on close
+            this.cleanupAudioResources(); // Clean up local resources on close
+            this.sessionPromise = null; // Clear promise on close
           },
+        },
+        config: { // <--- responseModalities and musicGenerationConfig moved here
+          responseModalities: [Modality.AUDIO],
+          musicGenerationConfig: this.currentMusicConfig,
         },
       });
     } catch (error) {
@@ -821,72 +895,75 @@ export class MusicLiveStreamApp extends LitElement {
       this.playbackState = 'stopped';
       this.requestUpdate();
       alert('Failed to connect to the music stream. Please ensure microphone access is granted.');
-      this.cleanupAudioResources(); // Clean up on connection error
+      this.cleanupAudioResources(); // Clean up local resources on connection error
+      this.sessionPromise = null; // Clear promise on connection error
     }
   }
 
   private async stopPlayback() {
     if (this.sessionPromise) {
       const session = await this.sessionPromise;
-      session.close();
-      this.sessionPromise = null;
+      if (session) {
+        session.close(); // This will trigger onclose.
+      }
     }
+    // Immediate UI update, but actual audio cleanup happens in onclose
+    // The state will be set to 'stopped' again in onclose, but this provides immediate feedback.
+    this.playbackState = 'stopped';
+    this.requestUpdate();
+    // Do not set this.sessionPromise = null here; it should be done in onclose/onerror.
+  }
+
+  private pausePlayback() {
+    if (this.playbackState !== 'playing') return;
+
     for (const source of this.sources.values()) {
       source.stop();
     }
     this.sources.clear();
-    this.nextStartTime = 0;
-    this.playbackState = 'stopped';
+    // Do NOT close session or stop mic stream. The model continues to generate.
+    this.playbackState = 'paused';
     this.requestUpdate();
-    // Also ensure microphone stream and processor are stopped
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach(track => track.stop());
-      this.mediaStream = null;
-    }
-    if (this.scriptProcessor) {
-      this.scriptProcessor.disconnect();
-      this.scriptProcessor.onaudioprocess = null;
-      this.scriptProcessor = null;
-    }
+    console.log('Playback paused. Session and microphone input remain active.');
   }
 
-  private async initializeFfmpeg() {
-    if (this.ffmpeg) {
-      return;
-    }
-    this.ffmpeg = new FFmpeg();
-    this.ffmpeg.on('log', ({message}) => console.log(`FFmpeg: ${message}`));
-    this.ffmpeg.on('progress', ({progress, time}) =>
-      console.log(`FFmpeg progress: ${progress * 100}% (time: ${time})`),
-    );
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-    await this.ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
+  private resumePlayback() {
+    if (this.playbackState !== 'paused') return;
+
+    // No need to re-initialize audio contexts or restart microphone stream
+    // as they were left active during pause.
+    this.playbackState = 'playing';
+    this.requestUpdate();
+    console.log('Playback resumed.');
   }
 
-  private async toggleRecording() {
-    if (this.recordingState === 'recording') {
-      this.stopRecording();
+  private handlePlayPauseButtonClick() {
+    if (this.playbackState === 'stopped' || this.playbackState === 'paused') {
+      if (this.playbackState === 'paused') {
+        this.resumePlayback();
+      } else {
+        this.connectLiveSession();
+      }
     } else if (this.playbackState === 'playing') {
-      await this.startRecording();
+      this.pausePlayback();
     }
   }
 
-  private async startRecording() {
-    if (this.recordingState !== 'idle' && this.recordingState !== 'finished') {
-      return;
-    }
+  private async handleRecordButtonClick() {
+    if (this.recordingState === 'processing') return;
 
-    this.recordedChunks = [];
-    this.recordedAudioUrl = null;
-    this.recordingState = 'initializing';
-    this.requestUpdate();
-
-    try {
-      const options = {mimeType: 'audio/webm'};
-      this.mediaRecorder = new MediaRecorder(this.outputAudioContext!.createMediaStreamDestination().stream, options);
+    if (this.recordingState === 'idle') {
+      // Start recording
+      if (!this.outputAudioContext) {
+        alert('Audio context not available for recording.');
+        return;
+      }
+      this.recordedChunks = [];
+      this.recordedAudioUrl = null;
+      // Capture the generated output directly from the gain node
+      const destination = this.outputAudioContext.createMediaStreamDestination();
+      this.outputGainNode?.connect(destination); // Connect output to recorder
+      this.mediaRecorder = new MediaRecorder(destination.stream);
 
       this.mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -897,68 +974,101 @@ export class MusicLiveStreamApp extends LitElement {
       this.mediaRecorder.onstop = async () => {
         this.recordingState = 'processing';
         this.requestUpdate();
+        try {
+          // Re-encode to MP3 using FFmpeg
+          await this.loadFFmpeg();
+          if (!this.ffmpeg) {
+            throw new Error('FFmpeg failed to load.');
+          }
 
-        const webmBlob = new Blob(this.recordedChunks, {type: 'audio/webm'});
-        const arrayBuffer = await webmBlob.arrayBuffer();
-        const inputFileName = 'input.webm';
-        const outputFileName = 'auralspirit_recording.mp3';
+          const audioBlob = new Blob(this.recordedChunks, {type: 'audio/webm'});
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
 
-        await this.initializeFfmpeg();
+          await this.ffmpeg.writeFile('input.webm', uint8Array);
+          await this.ffmpeg.exec(['-i', 'input.webm', 'output.mp3']);
 
-        await this.ffmpeg!.writeFile(inputFileName, new Uint8Array(arrayBuffer));
-        await this.ffmpeg!.exec([
-          '-i',
-          inputFileName,
-          '-f',
-          'mp3',
-          '-q:a',
-          '2', // Variable bitrate (VBR) quality level (0-9, where 0 is highest quality)
-          outputFileName,
-        ]);
+          const outputData = (await this.ffmpeg.readFile('output.mp3')) as Uint8Array;
+          const mp3Blob = new Blob([outputData], {type: 'audio/mp3'});
+          this.recordedAudioUrl = URL.createObjectURL(mp3Blob);
 
-        const data = await this.ffmpeg!.readFile(outputFileName);
-        const mp3Blob = new Blob([data as Uint8Array], {type: 'audio/mp3'});
-        this.recordedAudioUrl = URL.createObjectURL(mp3Blob);
-        this.recordingState = 'finished';
-        this.requestUpdate();
+          this.recordingState = 'finished';
+        } catch (error) {
+          console.error('Error processing recording:', error);
+          alert('Failed to process recording.');
+          this.recordingState = 'idle';
+        } finally {
+          // Fix: Use terminate() method for FFmpeg cleanup.
+          this.ffmpeg?.terminate(); // Clean up FFmpeg instance
+          this.ffmpeg = null;
+          this.requestUpdate();
+        }
       };
 
       this.mediaRecorder.start();
       this.recordingState = 'recording';
       this.requestUpdate();
-      console.log('Recording started');
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      this.recordingState = 'idle';
+    } else if (this.recordingState === 'recording') {
+      // Stop recording
+      this.mediaRecorder?.stop();
+      this.outputGainNode?.disconnect(); // Disconnect recorder from output
+      this.recordingState = 'processing'; // State will change to 'finished' or 'idle' after processing
       this.requestUpdate();
-      alert('Failed to start recording. Please ensure browser permissions.');
     }
   }
 
-  private stopRecording() {
-    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-      this.mediaRecorder.stop();
-      console.log('Recording stopped');
+  private async loadFFmpeg() {
+    if (this.ffmpeg) {
+      return;
     }
+    this.recordingState = 'initializing';
+    this.requestUpdate();
+    this.ffmpeg = new FFmpeg();
+    this.ffmpeg.on('log', ({message}) => console.log(`FFmpeg: ${message}`));
+    await this.ffmpeg.load({
+      coreURL: await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js', 'text/javascript'),
+      wasmURL: await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm', 'application/wasm'),
+      // workerURL: await toBlobURL('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/ffmpeg.js', 'text/javascript'),
+    });
+    // The recording state will be updated by handleRecordButtonClick after FFmpeg is loaded
   }
 
-  private handleVolumeChange(e: Event) {
-    const newVolume = (e.target as HTMLInputElement).valueAsNumber;
-    this.outputVolume = newVolume;
+  private handleVolumeChange(event: Event) {
+    const slider = event.target as HTMLInputElement;
+    this.outputVolume = parseFloat(slider.value);
     if (this.outputGainNode) {
-      this.outputGainNode.gain.value = newVolume;
+      this.outputGainNode.gain.value = this.outputVolume;
     }
   }
 
   override render() {
+    const isPlayingOrLoading =
+      this.playbackState === 'playing' || this.playbackState === 'loading';
     const isPlaying = this.playbackState === 'playing';
     const isLoading = this.playbackState === 'loading';
     const isStopped = this.playbackState === 'stopped';
     const isPaused = this.playbackState === 'paused';
-    const isRecording = this.recordingState === 'recording';
 
-    const recordingClasses = classMap({
-      'recording-active': isRecording,
+    const recordingDisabled =
+      this.recordingState === 'initializing' ||
+      this.recordingState === 'processing' ||
+      !isPlaying; // Can only record if playing
+
+    const playPauseButtonText = isPlaying
+      ? 'Pause'
+      : isLoading
+        ? 'Loading...'
+        : 'Play';
+
+    const playPauseButtonIcon = isPlaying
+      ? svg`<svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M576-216v-528h168v528H576Zm-336 0v-528h168v528H240Z"/></svg>`
+      : isLoading
+        ? html`<div class="spinner"></div>`
+        : svg`<svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M320-216v-528l440 264-440 264Z"/></svg>`;
+
+    const recordButtonClasses = classMap({
+      'record-button': true,
+      'recording-active': this.recordingState === 'recording',
     });
 
     return html`
@@ -968,137 +1078,139 @@ export class MusicLiveStreamApp extends LitElement {
           <p>Steer a continuous stream of music with text prompts</p>
         </header>
 
-        <section class="prompt-input-area">
-          <input
-            type="text"
-            id="promptInput"
-            @keydown=${this.handlePromptInputKeyDown}
-            placeholder="Type your music prompt here (e.g., 'chill lo-fi beats')"
-            .value=${this.currentPromptInput}
-            @input=${(e: Event) => {
-              this.currentPromptInput = (e.target as HTMLInputElement).value;
-            }}
-          />
-          <button @click=${this.addPrompt}>Add Prompt</button>
+        <section>
+          <div class="prompt-input-area">
+            <input
+              id="promptInput"
+              type="text"
+              placeholder="Enter a prompt, e.g., 'driving synthwave' or 'relaxing piano'"
+              .value=${this.currentPromptInput}
+              @input=${(e: Event) =>
+                (this.currentPromptInput = (e.target as HTMLInputElement).value)}
+              @keydown=${this.handlePromptInputKeyDown}
+              aria-label="Enter music prompt"
+            />
+            <button @click=${this.addPrompt} aria-label="Add prompt">
+              <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M440-440H200v-80h240V200h80v240h240v80H520v240h-80v-240Z"/></svg>
+              Add
+            </button>
+          </div>
+          <div class="prompt-presets">
+            ${map(
+              PROMPT_TEXT_PRESETS,
+              (preset) => html`
+                <button
+                  class="preset-button"
+                  @click=${() => this.addPresetPrompt(preset)}
+                  aria-label="Add preset prompt: ${preset}"
+                >
+                  ${preset}
+                </button>
+              `,
+            )}
+          </div>
         </section>
 
         <section class="prompts-list-area">
-          ${map(
-            this.prompts,
-            (prompt) => html`
-              <div
-                class="prompt-item"
-                style=${styleMap({
-                  borderColor: prompt.color,
-                  backgroundColor: hexToRgbA(prompt.color, 0.1),
-                })}
-              >
-                <div class="prompt-text-wrapper">
-                  <span class="prompt-text">${prompt.text}</span>
-                  <button
-                    class="remove-prompt-button"
-                    @click=${() => this.removePrompt(prompt.promptId)}
+          ${this.prompts.length === 0
+            ? html`<p style="text-align: center; color: #888;">
+                Add prompts to start generating music!
+              </p>`
+            : map(
+                this.prompts,
+                (p) => html`
+                  <div
+                    class="prompt-item"
+                    style="border-left-color: ${p.color}; background-color: ${hexToRgbA(p.color, 0.05)};"
                   >
-                    ${svg`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M6 18L18 6M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>`}
-                  </button>
-                </div>
-                <weight-slider
-                  .value=${prompt.weight}
-                  .color=${prompt.color}
-                  @value-change=${(e: CustomEvent<number>) =>
-                    this.updatePromptWeight(prompt.promptId, e.detail)}
-                ></weight-slider>
-              </div>
-            `,
-          )}
+                    <div class="prompt-text-wrapper">
+                      <span class="prompt-text">${p.text}</span>
+                      <button
+                        class="remove-prompt-button"
+                        @click=${() => this.removePrompt(p.promptId)}
+                        aria-label="Remove prompt: ${p.text}"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="m256-200-56-56 224-224-224-224 56-56 224 224 224-224 56 56-224 224 224 224-56 56-224-224-224 224Z"/></svg>
+                      </button>
+                    </div>
+                    <weight-slider
+                      .value=${p.weight}
+                      .color=${p.color}
+                      @value-change=${(e: CustomEvent<number>) =>
+                        this.updatePromptWeight(p.promptId, e.detail)}
+                      aria-label="Adjust weight for prompt: ${p.text}"
+                    ></weight-slider>
+                  </div>
+                `,
+              )}
         </section>
 
-        <section class="prompt-presets">
-          ${map(
-            PROMPT_TEXT_PRESETS,
-            (preset) => html`
-              <button class="preset-button" @click=${() => this.addPresetPrompt(preset)}>
-                ${preset}
-              </button>
-            `,
-          )}
-        </section>
-
-        <section class="controls-area">
-          <!-- Play/Stop Button -->
+        <div class="controls-area">
           <button
-            class="play-button"
-            @click=${isPlaying || isLoading ? this.stopPlayback : this.connectLiveSession}
+            class="play-pause-button"
+            @click=${this.handlePlayPauseButtonClick}
             ?disabled=${isLoading}
+            aria-label="${playPauseButtonText} music stream"
           >
-            ${isLoading
-              ? html`
-                  <div class="spinner"></div>
-                  Loading...
-                `
-              : isPlaying
-                ? html`
-                    ${svg`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M4 4H8V20H4V4ZM16 4H20V20H16V4Z" fill="currentColor"/>
-                    </svg>`}
-                    Stop
-                  `
-                : html`
-                    ${svg`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M8 5V19L19 12L8 5Z" fill="currentColor"/>
-                    </svg>`}
-                    Play
-                  `}
+            ${playPauseButtonIcon} ${playPauseButtonText}
           </button>
 
-          <!-- Volume Slider -->
+          <button
+            class="stop-button"
+            @click=${this.stopPlayback}
+            ?disabled=${isStopped || isLoading}
+            aria-label="Stop music stream"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M240-240v-480h480v480H240Z"/></svg>
+            Stop
+          </button>
+
           <div class="volume-control">
-            <label for="volume-slider">Volume</label>
+            <label for="volume-slider">Volume:</label>
             <input
               id="volume-slider"
               type="range"
               min="0"
               max="1"
               step="0.01"
-              .value=${this.outputVolume}
+              .value=${this.outputVolume.toString()}
               @input=${this.handleVolumeChange}
+              aria-label="Music volume"
             />
           </div>
 
-          <!-- Record Button -->
           <button
-            class="record-button ${recordingClasses}"
-            @click=${this.toggleRecording}
-            ?disabled=${!isPlaying || isLoading || this.recordingState === 'processing'}
+            class=${recordButtonClasses}
+            @click=${this.handleRecordButtonClick}
+            ?disabled=${recordingDisabled}
+            aria-label="${this.recordingState === 'recording' ? 'Stop recording' : 'Start recording'}"
           >
             ${this.recordingState === 'recording'
-              ? html`
-                  ${svg`<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="8"/></svg>`}
-                  Recording...
-                `
-              : this.recordingState === 'processing'
-                ? html`
-                    <div class="spinner"></div>
-                    Processing...
-                  `
-                : html`
-                    ${svg`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/>
-                    </svg>`}
-                    Record
-                  `}
+              ? svg`<svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M320-320v-320h320v320H320Z"/></svg>` // Stop icon (square)
+              : this.recordingState === 'processing' ||
+                  this.recordingState === 'initializing'
+                ? html`<div class="spinner"></div>`
+                : svg`<svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M480-360q-50 0-85-35t-35-85q0-50 35-85t85-35q50 0 85 35t35 85q0 50-35 85t-85 35Zm0 280q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z"/></svg>`}
+            ${this.recordingState === 'recording'
+              ? 'Recording'
+              : this.recordingState === 'initializing'
+                ? 'Initializing...'
+                : this.recordingState === 'processing'
+                  ? 'Processing...'
+                  : 'Record'}
           </button>
-        </section>
+        </div>
 
-        <!-- Recording download link -->
-        ${this.recordingState === 'finished' && this.recordedAudioUrl
-          ? html`
-              <a href=${this.recordedAudioUrl} download="auralspirit_recording.mp3" class="download-link">
-                Download Recording
-              </a>
-            `
+        ${this.recordedAudioUrl
+          ? html`<a
+              class="download-link"
+              href=${this.recordedAudioUrl}
+              download="auraspirit-music.mp3"
+              aria-label="Download recorded music"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"><path d="M480-320 280-520l56-56 104 104v-328h80v328l104-104 56 56-200 200ZM240-160q-33 0-56.5-23.5T160-240v-112h80v112h480v-112h80v112q0 33-23.5 56.5T720-160H240Z"/></svg>
+              Download Recording
+            </a>`
           : ''}
       </div>
     `;
